@@ -12,6 +12,31 @@ Este ejemplo existe para demostrar exactamente qué ocurre cuando nos equivocamo
 ### El Problema
 En el mundo real del Machine Learning, las redes tienen miles de millones de parámetros. Si gestionamos la memoria y los índices matriciales a mano, pasaremos más tiempo depurando *panics* que entrenando la red.
 
+### Visualización del Error
+
+```go
+// ❌ INCORRECTO: Dimensionamiento de pesos
+n_out := 3
+n_in := 4
+weights := make([]float64, 10) // ¡Debería ser n_out * n_in = 12!
+
+// Cuando i=2, j=3: idx = 2*4 + 3 = 11 → panic: index out of range
+```
+
+**Diagrama de la Catástrofe:**
+
+```
+Pesos reales (10 elementos):  [0][1][2][3][4][5][6][7][8][9]
+															↑
+													Fin válido
+
+Acceso esperado (12 elementos): [0]...[10][11]
+										   ↑
+									¡FUERA DE RANGO!
+```
+
+![Descripción del bug](./05_explain.png)
+
 ### Siguiente Paso ->
 [06-GonumMul](../06) - La solución profesional. Introducimos Gonum, la librería estándar *de facto* para álgebra lineal matemática en Go, que gestionará estas multiplicaciones de forma segura, acotada y optimizada.
 
