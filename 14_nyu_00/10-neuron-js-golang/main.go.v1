@@ -1,0 +1,253 @@
+package main
+
+import (
+	"fmt"
+	"image/color"
+	"log"
+	"math"
+	"math/rand"
+	"time"
+
+	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	"github.com/hajimehoshi/ebiten/v2/vector"
+)
+
+var trainingData = []struct {
+	inputs  []float64
+	targets []float64
+}{
+	{[]float64{0, 0}, []float64{0}},
+	{[]float64{0, 1}, []float64{1}},
+	{[]float64{1, 0}, []float64{1}},
+	{[]float64{1, 1}, []float64{0}},
+}
+
+// Función de activación Sigmoide para la visualización que mencionas
+func sigmoid(x float64) float64 {
+	return 1.0 / (1.0 + math.Exp(-x))
+}
+
+type NeuralNetwork struct {
+	inputLayer  []float64
+	hiddenLayer []float64
+	outputLayer []float64
+	weightsIH   [][]float64
+	weightsHO   [][]float64
+	biasH       []float64
+	biasO       []float64
+}
+
+func NewNeuralNetwork(inputSize, hiddenSize, outputSize int) *NeuralNetwork {
+	nn := &NeuralNetwork{
+		inputLayer:  make([]float64, inputSize),
+		hiddenLayer: make([]float64, hiddenSize),
+		outputLayer: make([]float64, outputSize),
+		weightsIH:   make([][]float64, hiddenSize),
+		weightsHO:   make([][]float64, outputSize),
+		biasH:       make([]float64, hiddenSize),
+		biasO:       make([]float64, outputSize),
+	}
+	for i := range nn.weightsIH {
+		nn.weightsIH[i] = make([]float64, inputSize)
+		for j := range nn.weightsIH[i] {
+			nn.weightsIH[i][j] = rand.NormFloat64()
+		}
+		nn.biasH[i] = rand.NormFloat64()
+	}
+	for i := range nn.weightsHO {
+		nn.weightsHO[i] = make([]float64, hiddenSize)
+		for j := range nn.weightsHO[i] {
+			nn.weightsHO[i][j] = rand.NormFloat64()
+		}
+		nn.biasO[i] = rand.NormFloat64()
+	}
+	return nn
+}
+
+func (nn *NeuralNetwork) Forward(inputs []float64) []float64 {
+	copy(nn.inputLayer, inputs)
+	for i := 0; i < len(nn.hiddenLayer); i++ {
+		sum := nn.biasH[i]
+		for j := 0; j < len(nn.inputLayer); j++ {
+			sum += nn.inputLayer[j] * nn.weightsIH[i][j]
+		}
+		nn.hiddenLayer[i] = math.Tanh(sum)
+	}
+	for i := 0; i < len(nn.outputLayer); i++ {
+		sum := nn.biasO[i]
+		for j := 0; j < len(nn.hiddenLayer); j++ {
+			sum += nn.hiddenLayer[j] * nn.weightsHO[i][j] // Corregido a [i][j]
+		}
+		nn.outputLayer[i] = sigmoid(sum) // Usamos sigmoide aquí para tu ejemplo visual
+	}
+	return nn.outputLayer
+}
+
+func (nn *NeuralNetwork) Backpropagate(targets []float64, lr float64) float64 {
+	outputErrors := make([]float64, len(nn.outputLayer))
+	totalError := 0.0
+	for i := range outputErrors {
+		outputErrors[i] = targets[i] - nn.outputLayer[i]
+		totalError += outputErrors[i] * outputErrors[i]
+	}
+
+	// Gradiente de salida (Sigmoide: d/dx = f(x)*(1-f(x)))
+	for i := range nn.weightsHO {
+		gradient := outputErrors[i] * nn.outputLayer[i] * (1 - nn.outputLayer[i])
+		for j := range nn.weightsHO[i] {
+			nn.weightsHO[i][j] += lr * gradient * nn.hiddenLayer[j]
+		}
+		nn.biasO[i] += lr * gradient
+	}
+
+	// Error capa oculta (Corregido el índice del pánico)
+	hiddenErrors := make([]float64, len(nn.hiddenLayer))
+	for j := range nn.hiddenLayer {
+		errorSum := 0.0
+		for i := range nn.outputLayer {
+			// Los pesos que conectan la neurona oculta 'j' con la salida 'i' son weightsHO[i][j]
+			errorSum += outputErrors[i] * nn.weightsHO[i][j]
+		}
+		hiddenErrors[j] = errorSum
+	}
+
+	for i := range nn.weightsIH {
+		gradient := hiddenErrors[i] * (1 - nn.hiddenLayer[i]*nn.hiddenLayer[i])
+		for j := range nn.weightsIH[i] {
+			nn.weightsIH[i][j] += lr * gradient * nn.inputLayer[j]
+		}
+		nn.biasH[i] += lr * gradient
+	}
+	return totalError
+}
+
+type Game struct {
+	nn           *NeuralNetwork
+	learningRate float64
+	errorHistory []float64
+	currentIdx   int
+}
+
+func (g *Game) Update() error {
+	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
+		g.learningRate += 0.01
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
+		g.learningRate = math.Max(0.001, g.learningRate-0.01)
+	}
+
+	// ENTRENAMIENTO ACTIVO
+	if ebiten.IsKeyPressed(ebiten.KeyArrowUp) {
+		for i := 0; i < 30; i++ {
+			sample := trainingData[rand.Intn(len(trainingData))]
+			g.nn.Forward(sample.inputs)
+			err := g.nn.Backpropagate(sample.targets, g.learningRate)
+			if len(g.errorHistory) > 300 {
+				g.errorHistory = g.errorHistory[1:]
+			}
+			g.errorHistory = append(g.errorHistory, err)
+		}
+	}
+
+	if time.Now().UnixNano()%30 == 0 {
+		g.currentIdx = (g.currentIdx + 1) % len(trainingData)
+	}
+	g.nn.Forward(trainingData[g.currentIdx].inputs)
+	return nil
+}
+
+func (g *Game) Draw(screen *ebiten.Image) {
+	// ... (Código de dibujo de nodos y conexiones igual al anterior) ...
+	inX, hidX, outX := 120.0, 300.0, 480.0
+	for i, weights := range g.nn.weightsIH {
+		for j, w := range weights {
+			drawEdge(screen, float32(inX), float32(100+j*150), float32(hidX), float32(60+i*90), w)
+		}
+	}
+	for i, weights := range g.nn.weightsHO {
+		for j, w := range weights {
+			drawEdge(screen, float32(hidX), float32(60+j*90), float32(outX), float32(170+i*100), w)
+		}
+	}
+	drawNodes(screen, inX, 100, 150, g.nn.inputLayer, color.RGBA{100, 100, 255, 255})
+	drawNodes(screen, hidX, 60, 90, g.nn.hiddenLayer, color.RGBA{100, 255, 100, 255})
+	drawNodes(screen, outX, 170, 100, g.nn.outputLayer, color.RGBA{255, 100, 100, 255})
+
+	// GRÁFICA DE ERROR
+	drawErrorGraph(screen, g.errorHistory)
+
+	// VISUALIZACIÓN SIGMOIDE (Mini gráfica de ajuste)
+	drawSigmoidMatch(screen, g.nn.outputLayer[0], trainingData[g.currentIdx].targets[0])
+
+	msg := fmt.Sprintf("MANTÉN ARRIBA PARA ENTRENAR\nLR: %.3f\nPred: %.4f | Target: %.0f",
+		g.learningRate, g.nn.outputLayer[0], trainingData[g.currentIdx].targets[0])
+	ebitenutil.DebugPrint(screen, msg)
+}
+
+// Nueva función para ver el ajuste a la sigmoide
+func drawSigmoidMatch(screen *ebiten.Image, prediction, target float64) {
+	// Definimos las bases como float32 desde el inicio para evitar conflictos
+	var baseX float32 = 50.0
+	var baseY float32 = 400.0
+
+	// Dibujar barra de target (blanca)
+	// Convertimos el resultado de la multiplicación a float32 antes de restar
+	targetHeight := float32(target * 100)
+	vector.StrokeRect(screen, baseX, baseY-100, 20, 100, 1, color.White, true)
+	vector.DrawFilledRect(screen, baseX, baseY-targetHeight, 20, targetHeight, color.RGBA{255, 255, 255, 100}, true)
+
+	// Dibujar barra de predicción (colorida)
+	predictionHeight := float32(prediction * 100)
+	c := color.RGBA{255, 0, 0, 255}
+	if math.Abs(prediction-target) < 0.1 {
+		c = color.RGBA{0, 255, 0, 255}
+	}
+	vector.DrawFilledRect(screen, baseX+30, baseY-predictionHeight, 20, predictionHeight, c, true)
+	ebitenutil.DebugPrintAt(screen, "Match", int(baseX), int(baseY)+10)
+}
+
+func drawEdge(screen *ebiten.Image, x1, y1, x2, y2 float32, w float64) {
+	c := color.RGBA{255, 50, 50, 80}
+	if w > 0 {
+		c = color.RGBA{50, 255, 50, 80}
+	}
+	vector.StrokeLine(screen, x1, y1, x2, y2, float32(math.Abs(w)*2.5)+0.5, c, true)
+}
+
+func drawNodes(screen *ebiten.Image, x float64, startY, spacing float64, layer []float64, c color.RGBA) {
+	for i, val := range layer {
+		posY := float32(startY + float64(i)*spacing)
+		alpha := uint8(math.Min(255, math.Max(80, math.Abs(val)*255)))
+		vector.DrawFilledCircle(screen, float32(x), posY, 20, color.RGBA{c.R, c.G, c.B, alpha}, true)
+	}
+}
+
+func drawErrorGraph(screen *ebiten.Image, history []float64) {
+	if len(history) < 2 {
+		return
+	}
+	var baseX float32 = 320.0
+	var baseY float32 = 450.0
+
+	for i := 0; i < len(history)-1; i++ {
+		x1 := baseX + float32(i)
+		y1 := baseY - float32(history[i]*150)
+		x2 := baseX + float32(i+1)
+		y2 := baseY - float32(history[i+1]*150)
+
+		vector.StrokeLine(screen, x1, y1, x2, y2, 1.5, color.RGBA{255, 255, 0, 255}, true)
+	}
+}
+
+func (g *Game) Layout(w, h int) (int, int) { return 640, 480 }
+
+func main() {
+	rand.Seed(time.Now().UnixNano())
+	game := &Game{nn: NewNeuralNetwork(2, 4, 1), learningRate: 0.1}
+	ebiten.SetWindowSize(640, 480)
+	if err := ebiten.RunGame(game); err != nil {
+		log.Fatal(err)
+	}
+}
