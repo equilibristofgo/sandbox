@@ -1,0 +1,237 @@
+package main
+
+import (
+	"fmt"
+	"image/color"
+	"log"
+	"math"
+	"math/rand"
+	"time"
+
+	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/ebitenutil"
+	"github.com/hajimehoshi/ebiten/v2/inpututil"
+	"github.com/hajimehoshi/ebiten/v2/vector"
+)
+
+var trainingData = []struct {
+	inputs  []float64
+	targets []float64
+}{
+	{[]float64{0, 0}, []float64{0}},
+	{[]float64{0, 1}, []float64{1}},
+	{[]float64{1, 0}, []float64{1}},
+	{[]float64{1, 1}, []float64{0}},
+}
+
+// --- ESTRUCTURA DE LA RED ---
+
+type NeuralNetwork struct {
+	inputLayer  []float64
+	hiddenLayer []float64
+	outputLayer []float64
+	weightsIH   [][]float64
+	weightsHO   [][]float64
+	biasH       []float64
+	biasO       []float64
+}
+
+func NewNeuralNetwork(inputSize, hiddenSize, outputSize int) *NeuralNetwork {
+	nn := &NeuralNetwork{
+		inputLayer:  make([]float64, inputSize),
+		hiddenLayer: make([]float64, hiddenSize),
+		outputLayer: make([]float64, outputSize),
+		weightsIH:   make([][]float64, hiddenSize),
+		weightsHO:   make([][]float64, outputSize),
+		biasH:       make([]float64, hiddenSize),
+		biasO:       make([]float64, outputSize),
+	}
+	for i := range nn.weightsIH {
+		nn.weightsIH[i] = make([]float64, inputSize)
+		for j := range nn.weightsIH[i] {
+			nn.weightsIH[i][j] = rand.NormFloat64()
+		}
+		nn.biasH[i] = rand.NormFloat64()
+	}
+	for i := range nn.weightsHO {
+		nn.weightsHO[i] = make([]float64, hiddenSize)
+		for j := range nn.weightsHO[i] {
+			nn.weightsHO[i][j] = rand.NormFloat64()
+		}
+		nn.biasO[i] = rand.NormFloat64()
+	}
+	return nn
+}
+
+func (nn *NeuralNetwork) Forward(inputs []float64) []float64 {
+	copy(nn.inputLayer, inputs)
+
+	// Input -> Hidden
+	for i := 0; i < len(nn.hiddenLayer); i++ {
+		sum := nn.biasH[i]
+		for j := 0; j < len(nn.inputLayer); j++ {
+			sum += nn.inputLayer[j] * nn.weightsIH[i][j]
+		}
+		nn.hiddenLayer[i] = math.Tanh(sum)
+	}
+
+	// Hidden -> Output (Corregido)
+	for i := 0; i < len(nn.outputLayer); i++ {
+		sum := nn.biasO[i]
+		for j := 0; j < len(nn.hiddenLayer); j++ {
+			// Cambiamos [j][i] por [i][j] para que coincida con la estructura de la matriz
+			sum += nn.hiddenLayer[j] * nn.weightsHO[i][j]
+		}
+		nn.outputLayer[i] = sum
+	}
+	return nn.outputLayer
+}
+
+func (nn *NeuralNetwork) Backpropagate(targets []float64, lr float64) float64 {
+	outputErrors := make([]float64, len(nn.outputLayer))
+	totalError := 0.0
+	for i := range outputErrors {
+		outputErrors[i] = targets[i] - nn.outputLayer[i]
+		totalError += outputErrors[i] * outputErrors[i]
+	}
+	for i := range nn.weightsHO {
+		for j := range nn.weightsHO[i] {
+			nn.weightsHO[i][j] += lr * outputErrors[i] * nn.hiddenLayer[j]
+		}
+		nn.biasO[i] += lr * outputErrors[i]
+	}
+	hiddenErrors := make([]float64, len(nn.hiddenLayer))
+	for i := range nn.hiddenLayer {
+		errorSum := 0.0
+		for j := range nn.outputLayer {
+			errorSum += outputErrors[j] * nn.weightsHO[j][i]
+		}
+		hiddenErrors[i] = errorSum
+	}
+	for i := range nn.weightsIH {
+		gradient := hiddenErrors[i] * (1 - nn.hiddenLayer[i]*nn.hiddenLayer[i])
+		for j := range nn.weightsIH[i] {
+			nn.weightsIH[i][j] += lr * gradient * nn.inputLayer[j]
+		}
+		nn.biasH[i] += lr * gradient
+	}
+	return totalError
+}
+
+// --- LOGICA VISUAL ---
+
+type Game struct {
+	nn           *NeuralNetwork
+	learningRate float64
+	errorHistory []float64
+	currentIdx   int
+}
+
+func (g *Game) Update() error {
+	// Ajustar Learning Rate
+	if inpututil.IsKeyJustPressed(ebiten.KeyArrowRight) {
+		g.learningRate += 0.01
+	}
+	if inpututil.IsKeyJustPressed(ebiten.KeyArrowLeft) {
+		g.learningRate = math.Max(0.001, g.learningRate-0.01)
+	}
+
+	// Entrenar
+	if ebiten.IsKeyPressed(ebiten.KeyArrowUp) {
+		for i := 0; i < 20; i++ {
+			sample := trainingData[rand.Intn(len(trainingData))]
+			g.nn.Forward(sample.inputs)
+			err := g.nn.Backpropagate(sample.targets, g.learningRate)
+			if len(g.errorHistory) > 300 {
+				g.errorHistory = g.errorHistory[1:]
+			}
+			g.errorHistory = append(g.errorHistory, err)
+		}
+	}
+
+	// Visualización cíclica
+	if time.Now().UnixNano()%25 == 0 {
+		g.currentIdx = (g.currentIdx + 1) % len(trainingData)
+	}
+	g.nn.Forward(trainingData[g.currentIdx].inputs)
+	return nil
+}
+
+func (g *Game) Draw(screen *ebiten.Image) {
+	inX, hidX, outX := 120.0, 300.0, 480.0
+
+	// Dibujar Conexiones
+	for i, weights := range g.nn.weightsIH {
+		for j, w := range weights {
+			drawEdge(screen, float32(inX), float32(100+j*150), float32(hidX), float32(60+i*90), w)
+		}
+	}
+	for i, weights := range g.nn.weightsHO {
+		for j, w := range weights {
+			drawEdge(screen, float32(hidX), float32(60+j*90), float32(outX), float32(170+i*100), w)
+		}
+	}
+
+	// Dibujar Nodos
+	drawNodes(screen, inX, 100, 150, g.nn.inputLayer, color.RGBA{100, 100, 255, 255})
+	drawNodes(screen, hidX, 60, 90, g.nn.hiddenLayer, color.RGBA{100, 255, 100, 255})
+	drawNodes(screen, outX, 170, 100, g.nn.outputLayer, color.RGBA{255, 100, 100, 255})
+
+	// Gráfica de Error
+	drawErrorGraph(screen, g.errorHistory)
+
+	// Panel de Control
+	msg := fmt.Sprintf("ARRIBA: Entrenar | DER/IZQ: Ajustar LR\nLR: %.3f\n\nInput: %.0f, %.0f | Target: %.0f\nPrediction: %.4f",
+		g.learningRate, trainingData[g.currentIdx].inputs[0], trainingData[g.currentIdx].inputs[1],
+		trainingData[g.currentIdx].targets[0], g.nn.outputLayer[0])
+	ebitenutil.DebugPrint(screen, msg)
+}
+
+func drawEdge(screen *ebiten.Image, x1, y1, x2, y2 float32, w float64) {
+	c := color.RGBA{255, 50, 50, 80}
+	if w > 0 {
+		c = color.RGBA{50, 255, 50, 80}
+	}
+	vector.StrokeLine(screen, x1, y1, x2, y2, float32(math.Abs(w)*2.5)+0.5, c, true)
+}
+
+func drawNodes(screen *ebiten.Image, x float64, startY, spacing float64, layer []float64, c color.RGBA) {
+	for i, val := range layer {
+		posY := float32(startY + float64(i)*spacing)
+		alpha := uint8(math.Min(255, math.Max(80, math.Abs(val)*255)))
+		vector.DrawFilledCircle(screen, float32(x), posY, 20, color.RGBA{c.R, c.G, c.B, alpha}, true)
+		ebitenutil.DebugPrintAt(screen, fmt.Sprintf("%.2f", val), int(x)-15, int(posY)+25)
+	}
+}
+
+func drawErrorGraph(screen *ebiten.Image, history []float64) {
+	if len(history) < 2 {
+		return
+	}
+	baseX, baseY := 300.0, 450.0
+	vector.StrokeLine(screen, float32(baseX), float32(baseY), float32(baseX+310), float32(baseY), 1, color.White, true)
+	for i := 0; i < len(history)-1; i++ {
+		vector.StrokeLine(screen, float32(baseX+float64(i)), float32(baseY-(history[i]*100)),
+			float32(baseX+float64(i+1)), float32(baseY-(history[i+1]*100)), 1.5, color.RGBA{255, 255, 0, 255}, true)
+	}
+}
+
+func (g *Game) Layout(w, h int) (int, int) { return 640, 480 }
+
+func main() {
+	rand.Seed(time.Now().UnixNano())
+
+	// 2 entradas (XOR), 4 ocultas, 1 salida
+	nn := NewNeuralNetwork(2, 4, 1)
+
+	game := &Game{
+		nn:           nn,
+		learningRate: 0.1,
+		errorHistory: make([]float64, 0),
+	}
+
+	ebiten.SetWindowSize(640, 480)
+	if err := ebiten.RunGame(game); err != nil {
+		log.Fatal(err)
+	}
+}
