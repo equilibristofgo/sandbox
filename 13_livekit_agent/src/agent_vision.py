@@ -4,8 +4,12 @@ import aiohttp
 import re
 import json
 import uuid
+import os
+import math
+import time
+import asyncio
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ImageDraw
 from livekit import rtc
 from livekit.agents import (
     Agent,
@@ -23,7 +27,98 @@ from livekit.agents import (
 from livekit.plugins import openai, silero
 
 logger = logging.getLogger("agent")
-load_dotenv(".env.local")
+class JarvisOrbVisualizer:
+    """Generador visual de un orbe holográfico reactivo publicado como rtc.LocalVideoTrack en LiveKit.
+    100% local, corre en CPU con Pillow a 25 FPS sin consumir VRAM de la GPU."""
+    def __init__(self, width: int = 512, height: int = 512, fps: int = 25):
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.state = "idle"  # "idle", "thinking", "speaking"
+        self.running = False
+        self.source = rtc.VideoSource(width=width, height=height)
+        self.track = rtc.LocalVideoTrack.create_video_track("jarvis-orb", self.source)
+        self._task = None
+
+    def set_state(self, state: str):
+        if state in ("idle", "thinking", "speaking") and state != self.state:
+            self.state = state
+            logger.info(f"[JarvisOrbVisualizer] Estado visual: {state.upper()}")
+
+    async def start(self):
+        self.running = True
+        self._task = asyncio.create_task(self._render_loop())
+
+    async def stop(self):
+        self.running = False
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    async def _render_loop(self):
+        frame_duration = 1.0 / self.fps
+        t = 0.0
+        cx, cy = self.width // 2, self.height // 2
+
+        while self.running:
+            start_time = time.monotonic()
+            t += frame_duration
+
+            # Fondo espacial oscuro / cian muy profundo
+            img = Image.new("RGBA", (self.width, self.height), (10, 14, 23, 255))
+            draw = ImageDraw.Draw(img)
+
+            if self.state == "idle":
+                # Estado de escucha: respiración suave azul/cian
+                pulse = math.sin(t * 2.2)
+                core_r = 75 + pulse * 7
+
+                draw.ellipse([cx - (core_r + 40), cy - (core_r + 40), cx + (core_r + 40), cy + (core_r + 40)], outline=(0, 180, 220, 60), width=2)
+                draw.ellipse([cx - (core_r + 18), cy - (core_r + 18), cx + (core_r + 18), cy + (core_r + 18)], outline=(0, 215, 255, 120), width=3)
+                draw.ellipse([cx - core_r, cy - core_r, cx + core_r, cy + core_r], fill=(0, 160, 235, 230), outline=(140, 240, 255, 255), width=4)
+                draw.ellipse([cx - 20, cy - 20, cx + 20, cy + 20], fill=(225, 248, 255, 255))
+
+            elif self.state == "thinking":
+                # Estado pensando: anillos orbitales giratorios de cálculo rápido
+                pulse = math.sin(t * 6.5)
+                core_r = 65 + pulse * 5
+
+                draw.ellipse([cx - core_r, cy - core_r, cx + core_r, cy + core_r], fill=(0, 210, 230, 230), outline=(255, 255, 255, 255), width=3)
+
+                for ring_idx, (r_x, r_y, speed) in enumerate([(135, 48, 3.8), (115, 38, -4.5), (155, 60, 2.3)]):
+                    angle = t * speed
+                    for dot in range(12):
+                        th = angle + dot * (math.pi / 6)
+                        dx = cx + r_x * math.cos(th)
+                        dy = cy + r_y * math.sin(th)
+                        draw.ellipse([dx - 4, dy - 4, dx + 4, dy + 4], fill=(0, 240, 255, 210))
+
+                draw.ellipse([cx - 15, cy - 15, cx + 15, cy + 15], fill=(255, 255, 255, 255))
+
+            elif self.state == "speaking":
+                # Estado hablando: ondas de frecuencia dinámica y pulso sonoro
+                audio_wave = abs(math.sin(t * 8.5)) * 26 + math.sin(t * 16.0) * 12
+                core_r = 80 + audio_wave
+
+                for i in range(1, 4):
+                    ring_r = core_r + i * 28 + (math.sin(t * 11.0 + i) * 6)
+                    alpha = max(20, 180 - i * 50)
+                    draw.ellipse([cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r], outline=(0, 230, 255, alpha), width=3)
+
+                draw.ellipse([cx - core_r, cy - core_r, cx + core_r, cy + core_r], fill=(0, 155, 255, 240), outline=(210, 250, 255, 255), width=5)
+                draw.ellipse([cx - 28, cy - 28, cx + 28, cy + 28], fill=(245, 255, 255, 255))
+
+            raw_bytes = img.tobytes()
+            video_frame = rtc.VideoFrame(self.width, self.height, rtc.VideoBufferType.RGBA, raw_bytes)
+            self.source.capture_frame(video_frame)
+
+            elapsed = time.monotonic() - start_time
+            sleep_time = max(0.001, frame_duration - elapsed)
+            await asyncio.sleep(sleep_time)
+
 
 class VisionManager:
     def __init__(self, ocr_url: str = "http://localhost:8001/ocr"):
@@ -62,7 +157,7 @@ class VisionManager:
         return None
 
 class Assistant(Agent):
-    def __init__(self, room: rtc.Room) -> None:
+    def __init__(self, room: rtc.Room, visualizer: JarvisOrbVisualizer = None) -> None:
         super().__init__(
             instructions="""Eres un experto en Go.
             REGLA DE ORO: Si el usuario dice "mira mi pantalla" o "analiza mi código", DEBES responder LLAMANDO a 'analyze_screen_code'.
@@ -73,6 +168,7 @@ class Assistant(Agent):
         )
         self.vision = VisionManager()
         self.room = room
+        self.visualizer = visualizer
 
     @function_tool
     async def ping(self):
@@ -84,6 +180,9 @@ class Assistant(Agent):
     async def analyze_screen_code(self, context: RunContext, query: str = "Analiza el código en pantalla"):
         """Analiza la pantalla compartida actual para extraer y entender el código fuente."""
         logger.info(f"--- TOOL CALL: analyze_screen_code (query: {query}) ---")
+        if self.visualizer:
+            self.visualizer.set_state("thinking")
+
         screenshot = await self.vision.get_latest_screenshot(self.room)
         
         if not screenshot:
@@ -111,6 +210,9 @@ class Assistant(Agent):
         tools: list[llm.Tool],
         model_settings: ModelSettings,
     ):
+        if self.visualizer:
+            self.visualizer.set_state("thinking")
+
         buffer = ""
         async for chunk in super().llm_node(chat_ctx, tools, model_settings):
             if isinstance(chunk, llm.ChatChunk) and chunk.delta:
@@ -175,10 +277,22 @@ server = AgentServer(setup_fnc=prewarm)
 @server.rtc_session()
 async def my_agent(ctx: JobContext):
     ctx.log_context_fields = {"room": ctx.room.name}
-    
+
+    # Configuración del modo de avatar: "orb", "anam", "web", o "none"
+    avatar_mode = os.getenv("AVATAR_MODE", "orb").lower()
+    logger.info(f"--- Modo de Avatar seleccionado: {avatar_mode.upper()} ---")
+
+    visualizer = None
+    if avatar_mode == "orb":
+        visualizer = JarvisOrbVisualizer(width=512, height=512, fps=25)
+        # Publicamos el track de vídeo en la sala como webcam nativa de Jarvis
+        await ctx.room.local_participant.publish_track(visualizer.track)
+        await visualizer.start()
+        ctx.add_shutdown_callback(visualizer.stop)
+        logger.info("VideoTrack de Jarvis Orb publicado con éxito en la sala.")
+
     # 1. Creamos la instancia de tu clase Assistant
-    # Esta instancia contiene las herramientas (@function_tool)
-    mi_asistente = Assistant(room=ctx.room)
+    mi_asistente = Assistant(room=ctx.room, visualizer=visualizer)
     logger.info(f"Agente instanciado. Herramientas detectadas: {[t.info.name for t in mi_asistente.tools]}")
 
     session = AgentSession(
@@ -219,6 +333,42 @@ async def my_agent(ctx: JobContext):
             audio_input=room_io.AudioInputOptions(noise_cancellation=None),
         ),
     )
+
+    # Sincronización de eventos de habla con el visualizador
+    if visualizer:
+        @session.on("agent_started_speaking")
+        def _on_agent_started_speaking():
+            visualizer.set_state("speaking")
+
+        @session.on("agent_stopped_speaking")
+        def _on_agent_stopped_speaking():
+            visualizer.set_state("idle")
+
+        @session.on("user_started_speaking")
+        def _on_user_started_speaking():
+            visualizer.set_state("idle")
+
+        @session.on("user_stopped_speaking")
+        def _on_user_stopped_speaking():
+            visualizer.set_state("thinking")
+
+    # Modo 3: Avatar fotorrealista en la nube (Anam) si está habilitado
+    if avatar_mode == "anam":
+        anam_api_key = os.getenv("ANAM_API_KEY")
+        anam_persona_id = os.getenv("ANAM_PERSONA_ID")
+        if anam_api_key and anam_persona_id:
+            try:
+                from livekit.plugins import anam
+                avatar = anam.Avatar(
+                    persona_id=anam_persona_id,
+                    api_key=anam_api_key,
+                )
+                await avatar.start(session, room=ctx.room)
+                logger.info("Anam Avatar iniciado con éxito en la sala.")
+            except ImportError:
+                logger.warning("livekit-plugins-anam no está instalado. Ejecuta: uv pip install livekit-plugins-anam")
+            except Exception as e:
+                logger.error(f"Error iniciando Anam Avatar: {e}")
 
     await session.say("Hola Jose, ojos activados. Si compartes tu pantalla, puedo ayudarte a analizar el código.", allow_interruptions=True)
     

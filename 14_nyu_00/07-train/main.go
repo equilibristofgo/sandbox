@@ -86,6 +86,19 @@ func main() {
 	}
 
 	// RESULTADO FINAL
-	fmt.Println("\nPredicciones finales:")
-	// (Aquí repetirías un Forward Pass final para ver los resultados cercanos a 0 y 1)
+	fmt.Println("\nPredicciones finales tras el entrenamiento:")
+	var hiddenFinal, outputFinal mat.Dense
+	hiddenFinal.Mul(inputs, wHidden)
+	hiddenFinal.Apply(func(i, j int, v float64) float64 { return sigmoid(v) }, &hiddenFinal)
+
+	outputFinal.Mul(&hiddenFinal, wOutput)
+	outputFinal.Apply(func(i, j int, v float64) float64 { return sigmoid(v) }, &outputFinal)
+
+	for i := 0; i < 4; i++ {
+		in1 := inputs.At(i, 0)
+		in2 := inputs.At(i, 1)
+		target := targets.At(i, 0)
+		pred := outputFinal.At(i, 0)
+		fmt.Printf("Input: [%.0f, %.0f] -> Target: %.0f | Predicción: %.4f\n", in1, in2, target, pred)
+	}
 }
